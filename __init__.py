@@ -104,9 +104,49 @@ class BroadcastByInputName(io.ComfyNode):
         return io.NodeOutput(source)
 
 
+class NamedSet(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MinNamedSet",
+            display_name="Named Set",
+            category="Min_node/Routing",
+            description="Broadcasts a value to every Named Get with the same channel. Requires cg-use-everywhere.",
+            inputs=[
+                Anything.Input("source"),
+                io.String.Input("channel", default="main"),
+            ],
+            outputs=[Anything.Output("value")],
+        )
+
+    @classmethod
+    def execute(cls, source, channel: str) -> io.NodeOutput:
+        return io.NodeOutput(source)
+
+
+class NamedGet(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MinNamedGet",
+            display_name="Named Get",
+            category="Min_node/Routing",
+            description="Receives the value from a Named Set with the same channel. Requires cg-use-everywhere.",
+            inputs=[
+                Anything.Input("value"),
+                io.String.Input("channel", default="main"),
+            ],
+            outputs=[Anything.Output("value")],
+        )
+
+    @classmethod
+    def execute(cls, value, channel: str) -> io.NodeOutput:
+        return io.NodeOutput(value)
+
+
 class MinNodeExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [PromptVariableDictionary, PromptTemplateRenderer, BroadcastByInputName]
+        return [PromptVariableDictionary, PromptTemplateRenderer, BroadcastByInputName, NamedSet, NamedGet]
 
 
 async def comfy_entrypoint() -> MinNodeExtension:
