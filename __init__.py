@@ -1,7 +1,9 @@
+from comfy.comfy_types.node_typing import IO
 from comfy_api.latest import ComfyExtension, io
 
 
 PromptVariables = io.Custom("MIN_PROMPT_VARIABLES")
+Anything = io.Custom(IO.ANY)
 
 
 class PromptVariableDictionary(io.ComfyNode):
@@ -78,10 +80,38 @@ class PromptTemplateRenderer(io.ComfyNode):
         return io.NodeOutput(rendered)
 
 
+class BroadcastByInputName(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MinBroadcastByInputName",
+            display_name="Broadcast by Input Name",
+            category="Min_node/Routing",
+            description="Broadcasts a connected value to every empty, type-compatible input with the exact target name. Requires cg-use-everywhere.",
+            inputs=[
+                Anything.Input("source"),
+                io.String.Input(
+                    "target_input_name",
+                    display_name="target input name",
+                    default="prompt_variables",
+                ),
+            ],
+            outputs=[Anything.Output("broadcast")],
+        )
+
+    @classmethod
+    def execute(cls, source, target_input_name: str) -> io.NodeOutput:
+        return io.NodeOutput(source)
+
+
 class MinNodeExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [PromptVariableDictionary, PromptTemplateRenderer]
+        return [PromptVariableDictionary, PromptTemplateRenderer, BroadcastByInputName]
 
 
 async def comfy_entrypoint() -> MinNodeExtension:
     return MinNodeExtension()
+
+
+WEB_DIRECTORY = "./js"
+__all__ = ["WEB_DIRECTORY"]
