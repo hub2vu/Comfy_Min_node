@@ -38,104 +38,103 @@ disconnected; selecting a disconnected input reports an error.
 - **Min_node / Routing**: Broadcast by Input Name, Named Set and Named Get
   (requires `cg-use-everywhere`).
 
-## Face Detailer
+## Face Detailer: explicit data connections
 
-Requires **ComfyUI-Impact-Pack**. Find these five nodes under **Min_node / Detailer**
-and connect their `state` sockets in order:
+Requires ComfyUI with the native **Start Loop / End Loop** nodes (tested on
+0.43.0), Impact Pack and Impact Subpack. No session object, `state`, `SEGS`,
+`DETAILER_PIPE`, coroutine runner or JSON data bundle is passed between nodes.
+JSON reports are inspection outputs, not computation inputs.
 
-```text
-1. Face Detect -> 2. Face Mask -> 3. Face Crop / Upscale
-              -> 4. Face Regenerate -> 5. Face Composite
-```
+Detection exposes separate standard lists: region index, class label, confidence,
+bbox coordinate dtype, four bbox coordinates, four crop coordinates and MASKs.
+`bbox_dtype` preserves the provider's float32 arithmetic while the coordinate
+ports themselves contain ordinary FLOAT values.
 
-Set all original FaceDetailer inputs and controls on **1. Face Detect**. The first
-six outputs of the final node remain the original outputs, with the same list flags:
-`image`, `cropped_refined`, `cropped_enhanced_alpha`, `mask`, `detailer_pipe`,
-and `cnet_images`.
+- **YOLO / BBox Detect** accepts IMAGE and BBOX_DETECTOR directly from Impact's
+  **UltralyticsDetectorProvider**. No model/CLIP/VAE/wildcard inputs are required.
+- **YOLO Segmentation Detect** is the equivalent independent SEGM_DETECTOR input.
+- **SAM / Region Masks** accepts IMAGE, explicit boxes/crop coordinates, crop-local
+  MASKs and SAM_MODEL directly from **SAMLoader (Impact)**. It produces refined
+  crop-local MASKs, a full-image combined mask and an overlay. `use_sam=False`
+  preserves detector masks; the connected SAM loader is lazy until enabled.
+- **Detailer Wildcard / Region Order** handles ordering, labels, `[CONCAT]`,
+  `[SKIP]`, `[STOP]`, per-region text and seeds separately from detection.
+- **Select Region / Explicit Coordinates** chooses by `image:index`, exposes the
+  selected coordinates/mask/text/seed, and emits separate process/sample flags.
+- **Crop / Upscale / Feather Masks** uses only its visible image, mask, numeric
+  inputs and settings. Its optional MODEL input only preserves the legacy
+  AITemplate size cap when that integration is actually being used.
+- **Crop Conditioning Masks** and **Detailer Wildcard / LoRA Encode** expose
+  standard CONDITIONING/MODEL/CLIP outputs. Concatenation and switches are visible
+  existing nodes in the workflow.
+- **Attach Detailer Noise Mask** preserves the original N,H,W noise-mask layout
+  in a standard LATENT. **Detailer Differential Diffusion** applies the original
+  conditional model patch. Neither performs sampling.
+- **Resize Region / Composite** receives IMAGE, MASK and explicit crop coordinates.
 
-The implementation reads the installed FaceDetailer functions and inserts pause
-points and optional selection gates between stages. With the default all-region
-selection it keeps every original operation statement and verifies
-that removing the pause points and delegated calls restores the original syntax
-tree. It also checks that the on-disk source matches the loaded function bytecode.
-Impact Pack source, functions, and model weights are not patched.
+Image encoding, decoding, inpaint conditioning and sampling use the **existing
+ComfyUI nodes**. There is no Min sampling node. The sigma adapter only constructs
+SIGMAS/SAMPLER inputs using Impact's schedule conventions; it never evaluates the
+model or runs a sampler.
 
-Multiple faces must remain sequential: the next crop is taken from the image
-after the previous face has been composited. Stage 5 expands subsequent stage
-executions automatically, including the original per-image/per-face seeds,
-wildcards, hooks, skips, sorting, batch aggregation, and empty outputs. A hidden
-continuation node preserves list outputs through ComfyUI graph expansion.
+### Saved workflows
 
-Each node has a scrollable inspector with full-size image links:
+- [Existing KSampler](examples/face_detailer_ksampler.json)
+- [Existing SamplerCustom, original denoised output](examples/face_detailer_denoised.json)
 
-| Stage | Inspector and additional outputs |
-| --- | --- |
-| 1 | Original image with bbox/crop outlines, class labels, confidence, zero-based detection indices; `detections` IMAGE list and JSON `report` |
-| 2 | Combined mask, each region's full-image mask and source-region preview, mask type and detection correspondence; `combined_mask`, `region_masks`, `mask_overlay` and `report` |
-| 3 | All actual original crops and upscaled inputs, their sizes, processing order and seed; `cropped` and `report` in addition to the existing `upscaled` socket |
-| 4 | Input/result thumbnails, per-region checkboxes, select-all/none and class buttons; `selected_indices`, `preview_only` and `report` |
-| 5 | Complete inspection summary and `inspection_report`, appended after the unchanged original six outputs |
+Both are ordinary native workflow JSON files with visible image/region/cycle
+loops. Parallel coordinate wires are intentional: individual values and masks
+can be inspected or replaced. Each region crops the IMAGE carried from the
+previous composite, preserving overlap order. Existing VAEEncode, VAEDecode,
+InpaintModelConditioning, ConditioningConcat and math/MUX nodes remain visible.
 
-Gallery IDs use `image_index:mask_index`, starting at zero. Stage 1 uses detection
-indices; stage 2 reports the source detection index when its refined mask can be
-matched. Its mask indices are used for selection. The class label is the label
-returned by the detector, not a newly inferred class. Individual masks are white
-inside the target and black outside; the inspector identifies bbox, SAM or
-segmentation masks. The original final mask still includes all detected masks.
+Default controls match ordinary FaceDetailer: all regions selected, preview off,
+SAM off, guide 512, max 1024, steps 20, CFG 8, denoise 0.5, blend feather 5,
+noise-mask feather 20 and one cycle. Shared settings are standard primitive nodes.
+Set `preview_only` on the selection node to inspect crops/upscales while skipping
+VAE encoding, diffusion and compositing, then turn it off to process the selection.
+A native Loop's normal execution cache should remain enabled.
 
-For choosing regions before diffusion, queue once with stage 4's `preview_only`
-enabled. Then check thumbnails (or a class button), disable `preview_only`, and
-queue again. `selected_indices` accepts `all` (default), `none`, `0,2`, `0-3`, or
-image-specific IDs such as `0:1,1:0`. Selecting fewer regions does not renumber
-the original processing indices or seeds. The UI changes apply to the next queue,
-not to an already running prompt. Set the seed control to fixed when reproducing
-a run across preview/processing queues.
+The KSampler variant implements the explicitly requested existing KSampler node.
+It is not bitwise identical to Impact's denoised path: a real GPU comparison found
+an approximately 1.9e-6 intermediate-latent difference. The denoised variant uses
+ComfyUI's **existing SamplerCustom.denoised_output**. On RTX 4060 Laptop,
+PyTorch 2.13.0+cu130 and waiIllustriousSDXL_v170, its crop/resize results, sampler
+input/output latents and final image matched the original exactly (two overlapping
+regions, 8 steps, guide 128, max 256, seed 1234).
 
-Run the complete five-stage chain, connected to an output such as Preview Image,
-to finish all galleries. Scroll within an inspector and click an image to open
-it at full size. The saved workflow retains selection settings and inspection
-metadata; preview PNGs use ComfyUI's temporary image directory.
+The old automatic session pipeline and its opaque hook/refiner/ControlNet wrapper
+propagation have been removed. Advanced hooks, refiners, custom noise and guider
+variants must be represented by the corresponding existing nodes and validated
+for that graph; the comparison above is not a universal claim for such setups.
 
-All gallery entries are retained, including skipped/not-reached regions. A
-detected-region thumbnail is labeled separately when the original pipeline did
-not actually crop that region. Later actual crops still come from the image after
-earlier selected regions have been composited. The stage 3/4 tensor sockets expose
-the current region; their inspectors accumulate all regions. The original final
-lists remain sorted as Impact Pack sorts them; `final_crop_index` and
-`final_alpha_index` map each region back to those output lists.
-As in the original, the detector supplies initial masks in stage 1; stage 2
-performs the optional SAM/segmentation refinement.
-Connect each `state` socket once; preview/data sockets may branch. Stages execute
-again for each queued run because their suspended execution cannot be cached and
-reused. An unsupported upstream code layout fails explicitly.
+On another installation, copy `examples/Min_node_detailer_example.png` to
+`ComfyUI/input/` and select your installed checkpoint/YOLO/SAM files in their
+loader nodes. API-format companions have `.api.json` names. The example image is
+a locally generated, fully clothed adult portrait for testing detection.
 
-Equivalence tests use the actual installed Impact Pack orchestration, cropping,
-masking, resizing, VAE node calls and compositing, with deterministic detector,
-VAE and sampler test doubles. They compare intermediate operation traces and all
-six outputs with exact tensor equality, including overlapping faces and batches.
-These tests do not establish bitwise equality for every real checkpoint/GPU;
-hardware nondeterminism and stateful external hooks remain environment-dependent.
+### Inspection and selection
 
-A separate real-checkpoint comparison passed on **RTX 4060 Laptop / PyTorch
-2.13.0+cu130 / waiIllustriousSDXL_v170**: two overlapping detection regions,
-seed 1234, 8 steps, guide size 128, max size 256. All six final outputs and all
-19 recorded intermediate operations matched exactly. The test uses real CLIP,
-VAE and diffusion sampling with fixed boxes on a synthetic image.
+Scroll within a node inspector and click images for full-size previews. Indexing
+starts at zero; `0:1` means image 0, detection 1. Selection accepts `all`, `none`,
+`0,2`, ranges such as `0-3`, or image-specific IDs such as `0:1,1:0`. The selected
+index is not renumbered when other regions are excluded. Processing order and seed
+are explicit outputs of the wildcard plan. Galleries accumulate native Loop
+iterations using UI metadata; no image-processing state is hidden in them.
 
-## Tests
+### Validation
 
-From the Windows portable directory:
+From the portable directory:
 
 ```powershell
 .\python_embeded\python.exe -s -m unittest discover -s .\ComfyUI\custom_nodes\Min_node\tests -v
 ```
 
-To repeat the real-checkpoint comparison with an installed model:
+For a real-checkpoint comparison of the explicit graph with original FaceDetailer:
 
 ```powershell
 .\python_embeded\python.exe -s .\ComfyUI\custom_nodes\Min_node\tests\compare_detailer_checkpoint.py --checkpoint waiIllustriousSDXL_v170.safetensors --report parity.json
 ```
 
-The checkpoint test defaults to CUDA; add `--cpu` for CPU execution. It supports
-`--steps`, `--guide-size` and `--max-size`. Run it with enough free memory to load
-the selected checkpoint alongside any other active ComfyUI instance.
+Add `--sampler KSampler --allow-difference` to measure the ordinary KSampler path.
+`--cpu`, `--steps`, `--guide-size`, and `--max-size` are also supported.

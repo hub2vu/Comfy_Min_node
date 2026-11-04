@@ -3,8 +3,8 @@ import { api } from "../../scripts/api.js";
 
 
 const STAGES = {
-    MinFaceDetect: "detect", MinFaceMask: "mask", MinFaceCropUpscale: "crop",
-    MinFaceRegenerate: "regenerate", MinFaceComposite: "composite",
+    MinFaceDetect: "detect", MinSegmentationDetect: "detect", MinFaceMask: "mask", MinFaceCropUpscale: "crop",
+    MinFaceSelect: "select", MinDetailerWildcardPlan: "wildcard", MinFaceComposite: "composite",
 };
 
 const style = document.createElement("style");
@@ -111,10 +111,10 @@ function render(node, view) {
         return;
     }
     const rows = view.rows || [];
-    const labels = { detect: "검출 위치 / class / 번호", mask: "마스크: 흰색=대상, 검정=바깥", crop: "원본 crop → 실제 확대 입력", regenerate: "처리할 영역 선택 / 재생성 결과", composite: "전체 처리 결과" };
+    const labels = { detect: "검출 위치 / class / 번호", mask: "마스크: 흰색=대상, 검정=바깥", crop: "원본 crop → 실제 확대 입력", select: "재생성할 영역 선택", wildcard: "Wildcard / 처리 순서 / seed", composite: "영역 합성 결과" };
     container.append(element("h4", `${labels[stage]} · ${rows.length}개`));
-    if (stage === "regenerate") {
-        container.append(element("div", "preview_only로 전체를 확인한 뒤 체크하고, preview_only를 끄고 다시 실행하세요. 번호는 이미지:마스크 인덱스이며 0부터 시작합니다.", "min-detailer-note"));
+    if (stage === "select") {
+        container.append(element("div", "체크한 영역만 기존 샘플러로 보냅니다. 번호는 이미지:검출 인덱스이며 0부터 시작합니다. 변경 후 다시 실행하세요.", "min-detailer-note"));
         const toolbar = element("div", null, "min-detailer-toolbar");
         toolbar.append(button("전체 선택", () => writeSelection(node, "all")), button("선택 해제", () => writeSelection(node, "none")));
         for (const label of new Set(rows.map((row) => row.class_label))) {
@@ -135,7 +135,7 @@ function render(node, view) {
         const card = element("section", null, "min-detailer-card");
         card.dataset.region = row.id;
         const title = `${row.id} · ${row.class_label} · ${Number(row.confidence).toFixed(3)}`;
-        if (stage === "regenerate") {
+        if (stage === "select") {
             const label = element("label");
             const checkbox = element("input");
             checkbox.type = "checkbox";
@@ -156,13 +156,15 @@ function render(node, view) {
         if (row.source_detection_index != null) metadata.push(`검출 번호: ${row.source_detection_index}`);
         if (row.processing_order != null) metadata.push(`처리 순서: ${row.processing_order}`);
         if (row.seed != null) metadata.push(`seed: ${row.seed}`);
+        if (row.text) metadata.push(`wildcard: ${row.text}`);
         if (row.final_crop_index != null) metadata.push(`최종 crop 출력: ${row.final_crop_index}`);
         if (row.status) metadata.push(row.status);
         card.append(element("div", metadata.join(" · "), "min-detailer-meta"));
         const pair = element("div", null, "min-detailer-pair");
         if (stage === "mask") pair.append(picture(row.mask, row.mask_kind), picture(row.region_preview, "대응 영역"));
         if (stage === "crop") pair.append(picture(row.cropped || row.region_preview, row.cropped ? "실제 원본 crop" : "검출 영역 (처리 전)"), picture(row.upscaled, "실제 확대 이미지"));
-        if (stage === "regenerate" || stage === "composite") pair.append(picture(row.upscaled || row.region_preview, "입력 영역"), picture(stage === "composite" ? row.final_refined || row.refined : row.refined, "처리 결과"));
+        if (stage === "select") pair.append(picture(row.region_preview, "선택 가능한 영역"));
+        if (stage === "composite") pair.append(picture(row.final_refined || row.refined, "리사이즈·합성된 영역"));
         if (pair.children.length) card.append(pair);
         container.append(card);
     }
@@ -196,11 +198,16 @@ function setup(node) {
 
 function update(view, fallback) {
     if (!view) return;
-    if (view.views) for (const child of Object.values(view.views)) update(child);
     const node = app.graph?.getNodeById(view.node_id) || fallback;
     if (!node || !STAGES[node.comfyClass]) return;
     setup(node);
-    if (node.minDetailerView?.run_id === view.run_id && node.minDetailerView?.complete && !view.complete) return;
+    if (node.minDetailerView?.run_id === view.run_id) {
+        const rows = new Map(node.minDetailerView.rows.map(row => [row.id, row]));
+        for (const row of view.rows) rows.set(row.id, row);
+        const overviews = new Map(node.minDetailerView.overviews.map(item => [item.image_index, item]));
+        for (const item of view.overviews) overviews.set(item.image_index, item);
+        view = { ...view, rows: [...rows.values()], overviews: [...overviews.values()] };
+    }
     node.properties ??= {};
     node.properties.min_detailer_view = view;
     node.minDetailerView = view;
@@ -222,8 +229,5 @@ app.registerExtension({
             previous?.apply(this, arguments);
             for (const view of output?.min_detailer || []) update(view, this);
         };
-    },
-    setup() {
-        api.addEventListener("min-node.detailer-preview", (event) => update(event.detail));
     },
 });

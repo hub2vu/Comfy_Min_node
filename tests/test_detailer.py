@@ -9,11 +9,9 @@ import unittest
 from unittest.mock import Mock, patch
 
 
-COMFY_ROOT = Path(__file__).resolve().parents[3]
-sys.path[:0] = [str(COMFY_ROOT), str(COMFY_ROOT / "custom_nodes/comfyui-impact-pack/modules")]
-
+ROOT = Path(__file__).resolve().parents[3]
+sys.path[:0] = [str(ROOT), str(ROOT / "custom_nodes/comfyui-impact-pack/modules")]
 from comfy.cli_args import args
-
 args.cpu = True
 
 import execution
@@ -22,60 +20,22 @@ import numpy as np
 import torch
 from aiohttp import web
 from comfy_api.latest import io
+from comfy_extras import nodes_custom_sampler, nodes_loop, nodes_math, nodes_primitive
 from server import PromptServer
 
 _old_server = getattr(PromptServer, "instance", None)
 PromptServer.instance = SimpleNamespace(routes=web.RouteTableDef(), add_on_prompt_handler=lambda handler: None)
 import impact.impact_server
-from impact import core, hooks, impact_pack, utils, wildcards
+from impact import core, impact_pack, utils, util_nodes, wildcards
 PromptServer.instance = _old_server
 
 from custom_nodes.Min_node.detailer import (
-    DETAILER_NODES, FaceComposite, FaceCropUpscale, FaceDetect, FaceMask, FaceRegenerate,
+    BBOX, CROP, REGION_FIELDS, DETAILER_NODES, FaceDetect, FaceMask, FaceCropUpscale, FaceComposite,
+    RegionSelect, WildcardPlan, DetailerSchedule, DetailerNoiseMask, _unpack,
 )
-from custom_nodes.Min_node.detailer_runner import _split_function
-from custom_nodes.Min_node.detailer_inspection import RegionSelection
-
-
-def snapshot(value):
-    if isinstance(value, FakeModel):
-        return {"model_options": snapshot(value.model_options)}
-    if isinstance(value, torch.Tensor):
-        return value.detach().clone()
-    if isinstance(value, np.ndarray):
-        return value.copy()
-    if isinstance(value, dict):
-        return {key: snapshot(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return tuple(snapshot(item) for item in value)
-    return value
-
-
-class FakeVAE:
-    def __init__(self, trace):
-        self.trace = trace
-
-    def encode(self, pixels):
-        self.trace.append(("encode", snapshot(pixels)))
-        return pixels.permute(0, 3, 1, 2).clone()
-
-    def encode_tiled(self, pixels, **kwargs):
-        self.trace.append(("encode_tiled", kwargs))
-        return self.encode(pixels)
-
-    def decode(self, samples):
-        self.trace.append(("decode", snapshot(samples)))
-        return samples.permute(0, 2, 3, 1).clamp(0, 1)
-
-    def decode_tiled(self, samples, **kwargs):
-        self.trace.append(("decode_tiled", kwargs))
-        return self.decode(samples)
-
-    def temporal_compression_decode(self):
-        return None
-
-    def spacial_compression_decode(self):
-        return 1
+from custom_nodes.Min_node.detailer_preview import RegionSelection
+from custom_nodes.Min_node.detailer_workflow import build_detailer_prompt
+from custom_nodes.Min_node.logic import LOGIC_NODES
 
 
 class FakeModel:
@@ -83,396 +43,226 @@ class FakeModel:
         self.model_options = {}
 
 
+class FakeVAE:
+    def encode(self, image):
+        return image.permute(0, 3, 1, 2).clone()
+
+    def decode(self, samples):
+        return samples.permute(0, 2, 3, 1).clamp(0, 1)
+
+
 class Detector:
-    def __init__(self, segments, trace):
-        self.segments = segments
-        self.trace = trace
-        self.override_bbox_by_segm = False
+    def __init__(self, regions):
+        self.regions = regions
+        self.aux = None
 
     def setAux(self, value):
-        self.trace.append(("setAux", value))
+        self.aux = value
 
-    def detect(self, image, *args, **kwargs):
-        self.trace.append(("detect", snapshot(image), args, kwargs))
-        return (tuple(image.shape[1:3]), self.segments)
-
-
-class TraceHook(hooks.DetailerHook):
-    def __init__(self, trace, skip=False):
-        self.trace, self.skip = trace, skip
-
-    def post_upscale(self, pixels, mask=None):
-        self.trace.append(("post_upscale", snapshot(pixels), snapshot(mask)))
-        return pixels * 0.97
-
-    def post_encode(self, latent):
-        self.trace.append(("post_encode", snapshot(latent)))
-        return latent
-
-    def pre_ksample(self, *values):
-        self.trace.append(("pre_ksample", snapshot(values)))
-        return values
-
-    def post_paste(self, image):
-        self.trace.append(("post_paste", snapshot(image)))
-        return image + 0.001
-
-    def get_skip_sampling(self):
-        self.trace.append(("get_skip_sampling", self.skip))
-        return self.skip
+    def detect(self, image, *values, **kwargs):
+        return tuple(image.shape[1:3]), self.regions
 
 
-class ControlWrapper:
-    def __init__(self, trace):
-        self.trace = trace
+def fixture(batch=1):
+    image = torch.linspace(0, 1, 32 * 40 * 3).reshape(1, 32, 40, 3).repeat(batch, 1, 1, 1)
+    regions = []
+    for crop, bbox, label in [((2, 2, 22, 24), (6, 6, 14, 14), "face"), ((10, 8, 34, 30), (14, 12, 26, 22), "hand")]:
+        mask = np.zeros((crop[3] - crop[1], crop[2] - crop[0]), dtype=np.float32)
+        mask[2:-2, 2:-2] = 1
+        regions.append(core.SEG(None, mask, np.asarray([0.9], dtype=np.float32), crop, np.asarray(bbox, dtype=np.float32), label, None))
+    return image, Detector(regions), FakeModel(), object(), FakeVAE(), [[torch.ones(1, 2, 4), {"mask": torch.ones(1, 32, 40)}]], [[torch.zeros(1, 2, 4), {}]]
 
-    def apply(self, positive, negative, image, mask):
-        self.trace.append(("control", snapshot(image), snapshot(mask)))
-        return positive, negative, [image.clone()]
 
-    def doit_ipadapter(self, model):
-        self.trace.append(("ipadapter",))
-        return model, []
+def sample(model, seed, steps, cfg, sampler, scheduler, positive, negative, latent, denoise, *extras, **kwargs):
+    noise = torch.rand(latent["samples"].shape, generator=torch.Generator().manual_seed(seed))
+    return {**latent, "samples": latent["samples"] * (1 - denoise / 2) + noise * (denoise / 2)}
+
+
+def schedule(cls, model, sampler_name, scheduler, steps, denoise):
+    return io.NodeOutput(torch.linspace(1, 0, steps + 1), SimpleNamespace(name=sampler_name, scheduler=scheduler, denoise=denoise), int(steps / denoise), int(steps / denoise) - steps)
+
+
+def native_sample(cls, model, add_noise, noise_seed, cfg, positive, negative, sampler, sigmas, latent_image):
+    result = sample(model, noise_seed, len(sigmas) - 1, cfg, sampler.name, sampler.scheduler, positive, negative, latent_image, sampler.denoise)
+    return io.NodeOutput(result, result)
+
+
+def differential(model):
+    result = copy.copy(model)
+    result.model_options = {**model.model_options, "denoise_mask_function": True}
+    return result
+
+
+def wildcard_encode(text, model, clip, processed=None):
+    if processed is not None:
+        processed.append(text)
+    return model, clip, [[torch.full((1, 2, 4), len(text) / 100), {}]]
+
+
+def primitives():
+    stack = ExitStack()
+    stack.enter_context(patch.object(core.impact_sampling, "ksampler_wrapper", sample))
+    stack.enter_context(patch.object(utils, "apply_differential_diffusion", differential))
+    stack.enter_context(patch.object(wildcards, "process_with_loras", wildcard_encode))
+    stack.enter_context(patch.object(DetailerSchedule, "execute", classmethod(schedule)))
+    stack.enter_context(patch.object(nodes_custom_sampler.SamplerCustom, "execute", classmethod(native_sample)))
+    return stack
 
 
 class DetailerTests(unittest.IsolatedAsyncioTestCase):
     def assert_exact(self, first, second):
-        self.assertIs(type(first), type(second))
         if isinstance(first, torch.Tensor):
+            self.assertEqual(first.shape, second.shape)
             self.assertEqual(first.dtype, second.dtype)
-            self.assertEqual(first.device, second.device)
-            self.assertTrue(torch.equal(first, second), f"Tensor differs: {first.shape}, {second.shape}")
-        elif isinstance(first, np.ndarray):
-            np.testing.assert_array_equal(first, second)
-        elif isinstance(first, dict):
-            self.assertEqual(first.keys(), second.keys())
-            for key in first:
-                self.assert_exact(first[key], second[key])
-        elif isinstance(first, (list, tuple)):
-            self.assertEqual(len(first), len(second))
-            for a, b in zip(first, second):
-                self.assert_exact(a, b)
+            self.assertTrue(torch.equal(first, second), "Tensor values differ")
         else:
             self.assertEqual(first, second)
 
-    def parameters(self, trace):
-        image = torch.linspace(0, 1, 32 * 40 * 3).reshape(1, 32, 40, 3)
-        segments = []
-        for crop, bbox in [((2, 2, 22, 24), (6, 6, 14, 14)), ((10, 8, 34, 30), (14, 12, 26, 22))]:
-            mask = np.zeros((crop[3] - crop[1], crop[2] - crop[0]), dtype=np.float32)
-            mask[2:-2, 2:-2] = 1
-            segments.append(core.SEG(None, mask, 0.9, crop, bbox, "face", None))
-        parameters = {}
-        for group in impact_pack.FaceDetailer.INPUT_TYPES().values():
-            for name, spec in group.items():
-                if len(spec) > 1 and "default" in spec[1]:
-                    parameters[name] = spec[1]["default"]
-                elif isinstance(spec[0], list):
-                    parameters[name] = spec[0][0]
-        parameters.update(
-            image=image, model=FakeModel(), clip=object(), vae=FakeVAE(trace), seed=1234,
-            guide_size=64, max_size=128, steps=2, cfg=3.0,
-            positive=[[torch.ones(1, 2, 4), {"mask": torch.ones(1, 32, 40)}]],
-            negative=[[torch.zeros(1, 2, 4), {}]], bbox_detector=Detector(segments, trace),
-            wildcard="", noise_mask_feather=2,
-        )
-        return parameters
+    def mappings(self):
+        mapping = {node.GET_SCHEMA().node_id: node for node in [*DETAILER_NODES, *LOGIC_NODES]}
+        mapping.update(nodes_loop.NODE_CLASS_MAPPINGS)
+        for node in (nodes_math.MathExpressionNode, nodes_primitive.Int, nodes_primitive.Float, nodes_primitive.Boolean, nodes_custom_sampler.SamplerCustom):
+            mapping[node.GET_SCHEMA().node_id] = node
+        mapping.update(ImpactImageBatchToImageList=util_nodes.ImageBatchToImageList, ImageListToImageBatch=util_nodes.ImageListToImageBatch)
+        return mapping
 
-    def primitives(self, trace):
-        stack = ExitStack()
-
-        def sample(model, seed, steps, cfg, sampler, scheduler, positive, negative, latent, denoise, *extra, **kwargs):
-            trace.append(("sample", seed, steps, cfg, sampler, scheduler, snapshot(positive), snapshot(negative), snapshot(latent), denoise, snapshot(kwargs)))
-            noise = torch.rand(latent["samples"].shape, generator=torch.Generator().manual_seed(seed))
-            return {**latent, "samples": latent["samples"] * (1 - denoise / 2) + noise * (denoise / 2)}
-
-        def differential(model):
-            trace.append(("differential",))
-            result = copy.copy(model)
-            result.model_options = {**model.model_options, "denoise_mask_function": True}
-            return result
-
-        def prompt(text, model, clip):
-            trace.append(("wildcard_encode", text))
-            return model, clip, [[torch.full((1, 2, 4), len(text) / 100), {}]]
-
-        stack.enter_context(patch.object(core.impact_sampling, "ksampler_wrapper", sample))
-        stack.enter_context(patch.object(utils, "apply_differential_diffusion", differential))
-        stack.enter_context(patch.object(wildcards, "process_with_loras", prompt))
-        for module, name in [
-            (utils, "crop_ndarray4"), (utils, "tensor_resize"), (utils, "tensor_gaussian_blur_mask"),
-            (utils, "tensor_paste"), (core, "crop_condition_mask"), (core, "segs_to_combined_mask"),
-            (utils, "tensor_convert_rgba"), (utils, "tensor_putalpha"), (utils, "empty_pil_tensor"),
-        ]:
-            original = getattr(module, name)
-
-            def record(*values, _name=name, _function=original, **kwargs):
-                trace.append((_name, "in", snapshot(values), snapshot(kwargs)))
-                result = _function(*values, **kwargs)
-                trace.append((_name, "out", snapshot(result)))
-                return result
-
-            stack.enter_context(patch.object(module, name, record))
-        return stack
-
-    def run_split(self, parameters, **options):
-        state = FaceDetect.execute(**parameters)[0]
-        FaceMask.execute(state)
-        while True:
-            FaceCropUpscale.execute(state)
-            FaceRegenerate.execute(state, **options)
-            output = FaceComposite.execute(state)
-            if state.phase == "complete":
-                self.assertIsNone(state.generator)
-                self.assertEqual(json.loads(output.result[6])["regenerate"]["rows"], state.inspection.views["regenerate"]["rows"])
-                return output.result[:6], state
-            self.assertTrue(output.expand)
-            if state.phase == "before_detect":
-                FaceDetect.execute(continuation=state, **parameters)
-                FaceMask.execute(state)
-
-    def compare(self, change=lambda parameters: None):
-        trace = []
-        parameters = self.parameters(trace)
-        change(parameters)
-        with patch.dict(nodes.NODE_CLASS_MAPPINGS, {"FaceDetailer": impact_pack.FaceDetailer}), self.primitives(trace):
-            random.seed(99)
-            expected = impact_pack.FaceDetailer().doit(**parameters)
-            expected_random_state = random.getstate()
-            expected_trace = snapshot(trace)
-            trace.clear()
-            random.seed(99)
-            actual, state = self.run_split(parameters)
-            self.assert_exact(expected, actual)
-            self.assert_exact(expected_trace, snapshot(trace))
-            self.assertEqual(random.getstate(), expected_random_state)
-        return actual
-
-    def test_exact_pixels_and_operation_trace(self):
-        self.compare()
-
-    def test_mismatched_loaded_code_is_rejected(self):
-        function = impact_pack.FaceDetailer.doit
-        original = function.__code__
-        function.__code__ = original.replace(co_consts=(*original.co_consts, "changed runtime"))
-        try:
-            with self.assertRaisesRegex(RuntimeError, "source and loaded code differ"):
-                _split_function(function, "outer")
-        finally:
-            function.__code__ = original
-
-    def test_batch_overlap_and_cycles(self):
-        self.compare(lambda p: p.update(image=p["image"].repeat(2, 1, 1, 1), cycle=2))
-
-    def test_no_faces_empty_masks_dummy_and_skips(self):
-        cases = [
-            lambda p: p["bbox_detector"].segments.clear(),
-            lambda p: [seg.cropped_mask.fill(0) for seg in p["bbox_detector"].segments],
-            lambda p: p.update(model="DUMMY"),
-            lambda p: p.update(force_inpaint=False, guide_size=4),
-            lambda p: p.update(force_inpaint=False, guide_size_for=False, guide_size=16),
-            lambda p: p.update(force_inpaint=True, guide_size_for=False, guide_size=16),
-            lambda p: p.update(wildcard="[SKIP]"),
-            lambda p: p.update(wildcard="[STOP]"),
-        ]
-        for index, change in enumerate(cases):
-            with self.subTest(case=index):
-                self.compare(change)
-
-    def test_masks_inpainting_tiling_and_wildcards(self):
-        for settings in [
-            {"noise_mask": False, "noise_mask_feather": 0, "feather": 0},
-            {"inpaint_model": True}, {"tiled_encode": True, "tiled_decode": True},
-            {"wildcard": "[ASC]"}, {"wildcard": "[DSC-SIZE]"},
-            {"wildcard": "a face"}, {"wildcard": "[CONCAT]a face"},
-        ]:
-            with self.subTest(settings=settings):
-                self.compare(lambda p: p.update(settings))
-
-    def test_hooks_and_control_images(self):
-        for skip in (False, True):
-            self.compare(lambda p: p.update(detailer_hook=TraceHook(p["vae"].trace, skip)))
-
-        def control(parameters):
-            detector = parameters["bbox_detector"]
-            detector.segments = [seg._replace(control_net_wrapper=ControlWrapper(detector.trace)) for seg in detector.segments]
-
-        self.compare(control)
-
-    def test_sam_and_segmentation_paths(self):
-        def sam(*values):
-            return torch.ones(32, 40)
-
-        with patch.object(core, "make_sam_mask", sam):
-            self.compare(lambda p: p.update(sam_model_opt=object()))
-        for override in (False, True):
-            def segmentation(parameters):
-                detector = Detector(parameters["bbox_detector"].segments[:1], parameters["vae"].trace)
-                detector.override_bbox_by_segm = override
-                parameters["segm_detector_opt"] = detector
-
-            self.compare(segmentation)
-
-    def test_schemas_preserve_original_settings_and_outputs(self):
-        self.assertEqual(sum(not node.define_schema().is_dev_only for node in DETAILER_NODES), 5)
-        actual = FaceDetect.INPUT_TYPES()
-        original = impact_pack.FaceDetailer.INPUT_TYPES()
-        for group, inputs in original.items():
-            for name, expected in inputs.items():
-                with self.subTest(input=name):
-                    spec = actual[group][name]
-                    if isinstance(expected[0], list):
-                        self.assertEqual(spec[0], "COMBO")
-                        self.assertEqual(spec[1]["options"], expected[0])
-                    else:
-                        self.assertEqual(spec[0], expected[0])
-                    if len(expected) > 1:
-                        for key in ("default", "min", "max", "step"):
-                            if key in expected[1]:
-                                self.assertEqual(spec[1].get(key), expected[1][key])
-        self.assertEqual(tuple(FaceComposite.RETURN_TYPES[:6]), impact_pack.FaceDetailer.RETURN_TYPES)
-        self.assertEqual(tuple(FaceComposite.RETURN_NAMES[:6]), impact_pack.FaceDetailer.RETURN_NAMES)
-        self.assertEqual(tuple(FaceComposite.OUTPUT_IS_LIST[:6]), impact_pack.FaceDetailer.OUTPUT_IS_LIST)
-
-    def test_inspection_reports_all_regions_and_masks(self):
-        trace = []
-        parameters = self.parameters(trace)
-        parameters["bbox_detector"].segments[1] = parameters["bbox_detector"].segments[1]._replace(label="hand")
-        with patch.dict(nodes.NODE_CLASS_MAPPINGS, {"FaceDetailer": impact_pack.FaceDetailer}), self.primitives(trace):
-            result, state = self.run_split(parameters)
-        views = state.inspection.views
-        self.assertEqual([row["id"] for row in views["detect"]["rows"]], ["0:0", "0:1"])
-        self.assertEqual([row["class_label"] for row in views["detect"]["rows"]], ["face", "hand"])
-        self.assertEqual(views["detect"]["rows"][0]["bbox"], [6, 6, 14, 14])
-        self.assertEqual(len(views["mask"]["rows"]), 2)
-        self.assertEqual(len(views["crop"]["rows"]), 2)
-        for row in views["regenerate"]["rows"]:
-            self.assertTrue(row["selected"])
-            self.assertEqual(row["status"], "composited")
-            for key in ("mask", "region_preview", "cropped", "upscaled", "refined"):
-                file = row[key]
-                self.assertTrue((state.inspection.folder / file["filename"]).is_file())
-        self.assertEqual(state.inspection.last_combined_mask.shape, (1, 32, 40))
-        self.assertEqual(len(state.inspection.last_region_masks), 2)
-        self.assertEqual({row["id"]: row["final_crop_index"] for row in views["regenerate"]["rows"]}, {"0:0": 1, "0:1": 0})
-        self.assertTrue(all(view["complete"] for view in views.values()))
-
-    def test_original_stop_still_lists_unreached_regions(self):
-        trace = []
-        parameters = self.parameters(trace)
-        parameters["wildcard"] = "[STOP]"
-        with patch.dict(nodes.NODE_CLASS_MAPPINGS, {"FaceDetailer": impact_pack.FaceDetailer}), self.primitives(trace):
-            result, state = self.run_split(parameters)
-        rows = state.inspection.views["regenerate"]["rows"]
-        self.assertEqual([row["id"] for row in rows], ["0:0", "0:1"])
-        self.assertEqual([row["status"] for row in rows], ["[STOP]", "not reached"])
-        self.assertTrue(all("region_preview" in row for row in rows))
-
-    def test_preview_only_skips_encoding_and_sampling(self):
-        trace = []
-        parameters = self.parameters(trace)
-        with patch.dict(nodes.NODE_CLASS_MAPPINGS, {"FaceDetailer": impact_pack.FaceDetailer}), self.primitives(trace):
-            result, state = self.run_split(parameters, preview_only=True)
-        self.assertTrue(torch.equal(result[0], parameters["image"]))
-        self.assertFalse(any(entry[0] in ("sample", "encode", "decode") for entry in trace))
-        self.assertEqual(len(state.inspection.views["crop"]["rows"]), 2)
-        self.assertTrue(all(row["status"] == "preview only" for row in state.inspection.views["regenerate"]["rows"]))
-        self.assertTrue(all(row["selected"] and not row["will_process"] and not row["processed"] for row in state.inspection.views["regenerate"]["rows"]))
-
-    def test_selection_preserves_original_indices_seeds_and_batch_ids(self):
-        for text, batch, wildcard, expected_seeds in [
-            ("1", 1, "", [1235]), ("0", 1, "[DSC]", [1235]),
-            ("1:0", 2, "", [1235]), ("none", 1, "", []),
-        ]:
-            with self.subTest(selection=text, batch=batch, wildcard=wildcard):
-                trace = []
-                parameters = self.parameters(trace)
-                parameters.update(image=parameters["image"].repeat(batch, 1, 1, 1), wildcard=wildcard)
-                with patch.dict(nodes.NODE_CLASS_MAPPINGS, {"FaceDetailer": impact_pack.FaceDetailer}), self.primitives(trace):
-                    result, state = self.run_split(parameters, selected_indices=text)
-                self.assertEqual([entry[1] for entry in trace if entry[0] == "sample"], expected_seeds)
-                for row in state.inspection.views["regenerate"]["rows"]:
-                    self.assertEqual(row["selected"], RegionSelection(text).includes(row["image_index"], row["index"]))
-
-    def test_selection_ranges_and_invalid_tokens(self):
-        selection = RegionSelection("0-2, 1:4-6")
-        self.assertTrue(selection.includes(3, 1))
-        self.assertTrue(selection.includes(1, 5))
-        self.assertFalse(selection.includes(0, 5))
-        with self.assertRaisesRegex(ValueError, "Use all"):
-            RegionSelection("face")
-
-
-    async def test_expansion_and_repeated_queue(self):
-        trace, captured = [], []
-        parameters = self.parameters(trace)
-        parameters["image"] = parameters["image"].repeat(2, 1, 1, 1)
-        object_names = [name for name, value in parameters.items() if not isinstance(value, (str, int, float, bool))]
-        original_inputs = impact_pack.FaceDetailer.INPUT_TYPES()
-        input_types = {name: spec[0] for group in original_inputs.values() for name, spec in group.items()}
+    async def compare_graph(self, batch=1, **settings):
+        image, detector, model, clip, vae, positive, negative = fixture(batch)
+        if settings.pop("no_faces", False):
+            detector.regions.clear()
+        if settings.pop("empty_masks", False):
+            for region in detector.regions:
+                region.cropped_mask.fill(0)
+        captured = []
 
         class Inputs(io.ComfyNode):
             @classmethod
             def define_schema(cls):
-                return io.Schema(node_id="MinDetailerTestInputs", outputs=[io.Custom(input_types[name]).Output(name) for name in object_names])
+                return io.Schema(node_id="MinExplicitTestInputs", outputs=[io.Image.Output(), io.Model.Output(), io.Clip.Output(), io.Vae.Output(),
+                                io.Conditioning.Output(), io.Conditioning.Output(), io.Custom("BBOX_DETECTOR").Output()])
 
             @classmethod
             def execute(cls):
-                return io.NodeOutput(*(parameters[name] for name in object_names))
+                return io.NodeOutput(image, model, clip, vae, positive, negative, detector)
 
         class Capture(io.ComfyNode):
             @classmethod
             def define_schema(cls):
-                return io.Schema(
-                    node_id="MinDetailerTestCapture", is_output_node=True, is_input_list=True,
-                    inputs=[io.AnyType.Input(name) for name in ("image", "crops", "alpha", "mask", "pipe", "control")],
-                )
+                return io.Schema(node_id="MinExplicitTestCapture", is_output_node=True, inputs=[io.Image.Input("image")])
 
             @classmethod
-            def execute(cls, image, crops, alpha, mask, pipe, control):
-                captured.append((image[0], crops, alpha, mask[0], pipe[0], control))
+            def execute(cls, image):
+                captured.append(image)
                 return io.NodeOutput()
 
-        classes = {node.define_schema().node_id: node for node in DETAILER_NODES}
-        classes.update(FaceDetailer=impact_pack.FaceDetailer, MinDetailerTestCapture=Capture, MinDetailerTestInputs=Inputs)
-        detect_inputs = {**parameters, **{name: ["inputs", index] for index, name in enumerate(object_names)}}
-        prompt = {
-            "inputs": {"class_type": "MinDetailerTestInputs", "inputs": {}},
-            "detect": {"class_type": "MinFaceDetect", "inputs": detect_inputs},
-            "mask": {"class_type": "MinFaceMask", "inputs": {"state": ["detect", 0]}},
-            "crop": {"class_type": "MinFaceCropUpscale", "inputs": {"state": ["mask", 0]}},
-            "regenerate": {"class_type": "MinFaceRegenerate", "inputs": {"state": ["crop", 0]}},
-            "composite": {"class_type": "MinFaceComposite", "inputs": {"state": ["regenerate", 0]}},
-            "capture": {"class_type": "MinDetailerTestCapture", "inputs": {
-                name: ["composite", i] for i, name in enumerate(("image", "crops", "alpha", "mask", "pipe", "control"))
-            }},
-        }
-        with patch.dict(nodes.NODE_CLASS_MAPPINGS, classes), self.primitives(trace):
-            server = SimpleNamespace(client_id=None, send_sync=Mock())
-            executor = execution.PromptExecutor(server, cache_args={"ram": 0, "ram_inactive": 0})
-            baseline_prompt = {
-                "inputs": prompt["inputs"],
-                "original": {"class_type": "FaceDetailer", "inputs": detect_inputs.copy()},
-                "capture": {"class_type": "MinDetailerTestCapture", "inputs": {
-                    name: ["original", i] for i, name in enumerate(("image", "crops", "alpha", "mask", "pipe", "control"))
-                }},
-            }
-            valid, _, outputs, errors = await execution.validate_prompt("original-detailer", baseline_prompt, None)
+        values = dict(guide_size=64, max_size=128, seed=1234, steps=2, cfg=3.0, denoise=0.5, noise_mask_feather=2)
+        values.update(settings)
+        links = [["inputs", index] for index in range(7)]
+        graph, output = build_detailer_prompt(links[0], links[1], links[2], links[3], links[4], links[5], links[6], **values)
+        graph.update(inputs={"class_type": "MinExplicitTestInputs", "inputs": {}}, capture={"class_type": "MinExplicitTestCapture", "inputs": {"image": output}})
+        original = dict(image=image, model=model, clip=clip, vae=vae, guide_size=values["guide_size"], guide_size_for=True, max_size=values["max_size"],
+                        seed=1234, steps=2, cfg=3.0, sampler_name="euler", scheduler="simple", positive=positive, negative=negative, denoise=0.5,
+                        feather=5, noise_mask=True, force_inpaint=True, bbox_threshold=0.5, bbox_dilation=10, bbox_crop_factor=3.0,
+                        sam_detection_hint="center-1", sam_dilation=0, sam_threshold=0.93, sam_bbox_expansion=0, sam_mask_hint_threshold=0.7,
+                        sam_mask_hint_use_negative="False", drop_size=10, bbox_detector=detector, wildcard="", noise_mask_feather=2)
+        for name in ("guide_size_for", "feather", "noise_mask", "force_inpaint", "wildcard", "noise_mask_feather", "inpaint_model"):
+            if name in values:
+                original[name] = values[name]
+        original["cycle"] = values.get("cycles", 1)
+        mapping = self.mappings()
+        mapping.update(MinExplicitTestInputs=Inputs, MinExplicitTestCapture=Capture)
+        server = SimpleNamespace(client_id=None, send_sync=Mock(), send_progress_text=Mock())
+        with patch.dict(nodes.NODE_CLASS_MAPPINGS, mapping), patch.object(PromptServer, "instance", server), primitives():
+            random.seed(99)
+            expected = impact_pack.FaceDetailer().doit(**original)[0]
+            expected_rng = random.getstate()
+            random.seed(99)
+            valid, _, outputs, errors = await execution.validate_prompt("explicit", graph, None)
             self.assertTrue(valid, errors)
-            await executor.execute_async(baseline_prompt, "original-detailer", execute_outputs=outputs)
+            executor = execution.PromptExecutor(server, cache_args={"ram": 0, "ram_inactive": 0})
+            await executor.execute_async(graph, "explicit", execute_outputs=outputs)
             self.assertTrue(executor.success, executor.status_messages)
-            expected = captured.pop()
-            expected_trace = snapshot(trace)
-            for index in range(2):
-                trace.clear()
-                queued_prompt = {key: {"class_type": node["class_type"], "inputs": node["inputs"].copy()} for key, node in prompt.items()}
-                valid, _, outputs, errors = await execution.validate_prompt(f"detailer-{index}", queued_prompt, None)
-                self.assertTrue(valid, errors)
-                await executor.execute_async(queued_prompt, f"detailer-{index}", execute_outputs=outputs)
-                self.assertTrue(executor.success, executor.status_messages)
-                self.assert_exact(expected, captured[-1])
-                self.assert_exact(expected_trace, snapshot(trace))
-        self.assertEqual(len(captured), 2)
+            self.assertEqual(len(captured), 1)
+            if not values.get("preview_only") and values.get("selected_indices", "all") == "all":
+                self.assert_exact(expected, captured[0])
+                self.assertEqual(expected_rng, random.getstate())
+        return captured[0], graph
+
+    def test_only_explicit_standard_data_ports(self):
+        forbidden = ("SEGS", "MIN_FACE_", "DETAILER_PIPE")
+        for node in DETAILER_NODES:
+            schema = node.GET_SCHEMA()
+            for port in (*schema.inputs, *schema.outputs):
+                self.assertNotIn(port.id, ("state", "continuation"))
+                self.assertFalse(any(token in port.io_type for token in forbidden))
+        self.assertNotIn("MinFaceRegenerate", [node.GET_SCHEMA().node_id for node in DETAILER_NODES])
+
+    def test_detector_is_standalone_and_coordinates_are_numeric(self):
+        image, detector, *_ = fixture()
+        result = FaceDetect.execute(image, detector, 0.5, 10, 3.0, 10)
+        columns = dict(zip((name for name, _ in REGION_FIELDS), result.args[1:1 + len(REGION_FIELDS)]))
+        self.assertEqual(result[0], 2)
+        self.assertEqual(columns["region_index"], [0, 1])
+        self.assertEqual(columns["labels"], ["face", "hand"])
+        self.assertTrue(all(type(value) is float for value in columns["bbox_x1"]))
+        self.assertEqual(columns["bbox_dtype"], ["float32", "float32"])
+        self.assertIsNone(detector.aux)
+
+    def test_sam_is_standalone_and_matches_native_mask_math(self):
+        image, detector, *_ = fixture()
+        columns = _unpack(detector.regions)
+        class Sam:
+            def prepare_device(self):
+                pass
+
+            def release_device(self):
+                pass
+
+            def predict(self, pixels, points, labels, box, threshold):
+                mask = np.zeros(pixels.shape[:2], dtype=bool)
+                mask[5:28, 4:30] = True
+                return [mask]
+        model = SimpleNamespace(sam_wrapper=Sam())
+        whole = core.make_sam_mask(model, (tuple(image.shape[1:3]), detector.regions), image, "center-1", 0, 0.93, 0, 0.7, "False")
+        expected = core.segs_bitwise_and_mask((tuple(image.shape[1:3]), detector.regions), whole)
+        actual = FaceMask.execute(image=[image], **columns, use_sam=[True], sam_model=[model], detection_hint=["center-1"],
+                                  dilation=[0], threshold=[0.93], bbox_expansion=[0], mask_hint_threshold=[0.7], mask_hint_use_negative=["False"])
+        for mask, region in zip(actual[0], expected[1]):
+            self.assertTrue(torch.equal(mask[0], torch.from_numpy(region.cropped_mask)))
+        self.assertTrue(torch.equal(actual[1][0], core.segs_to_combined_mask(expected)))
+        self.assertEqual(FaceMask.check_lazy_status([False], sam_model=[None]), [])
+        self.assertEqual(FaceMask.check_lazy_status([True], sam_model=[None]), ["sam_model"])
+        self.assertEqual(FaceMask.check_lazy_status([True], sam_model=(None,)), ["sam_model"])
+        self.assertEqual(FaceMask.check_lazy_status([True], sam_model=None), [])
+
+    async def test_overlapping_faces_native_loop_graph(self):
+        await self.compare_graph()
+
+    async def test_batches_and_cycles(self):
+        await self.compare_graph(batch=2, cycles=2)
+
+    async def test_no_faces_and_empty_masks(self):
+        await self.compare_graph(no_faces=True)
+        await self.compare_graph(empty_masks=True)
+
+    async def test_wildcard_modes(self):
+        for text in ("[ASC]", "[DSC]", "[DSC-SIZE]", "[SKIP]", "[STOP]", "a face", "[CONCAT]a face", "[LAB][face]a face[hand]a hand"):
+            with self.subTest(wildcard=text):
+                await self.compare_graph(wildcard=text)
+
+    async def test_mask_and_size_settings(self):
+        for settings in ({"noise_mask": False, "noise_mask_feather": 0}, {"inpaint_model": True}, {"force_inpaint": False, "guide_size_for": False, "guide_size": 64}):
+            with self.subTest(settings=settings):
+                await self.compare_graph(**settings)
+
+    async def test_preview_and_selection(self):
+        preview, _ = await self.compare_graph(preview_only=True)
+        image, *_ = fixture()
+        self.assertTrue(torch.equal(preview, image))
+        none, _ = await self.compare_graph(selected_indices="none")
+        self.assertTrue(torch.equal(none, image))
+        selected, _ = await self.compare_graph(selected_indices="0:1")
+        self.assertFalse(torch.equal(selected, image))
 
 
 if __name__ == "__main__":

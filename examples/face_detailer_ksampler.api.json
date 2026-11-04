@@ -1,0 +1,1094 @@
+{
+  "1": {
+    "inputs": {
+      "value": 5
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "feather"
+    }
+  },
+  "2": {
+    "inputs": {
+      "value": 20
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "noise mask feather"
+    }
+  },
+  "3": {
+    "inputs": {
+      "value": true
+    },
+    "class_type": "PrimitiveBoolean",
+    "_meta": {
+      "title": "noise mask"
+    }
+  },
+  "4": {
+    "inputs": {
+      "value": false
+    },
+    "class_type": "PrimitiveBoolean",
+    "_meta": {
+      "title": "inpaint model"
+    }
+  },
+  "5": {
+    "inputs": {
+      "value": 20
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "steps"
+    }
+  },
+  "6": {
+    "inputs": {
+      "value": 8
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "cfg"
+    }
+  },
+  "7": {
+    "inputs": {
+      "value": 0.5
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "denoise"
+    }
+  },
+  "8": {
+    "inputs": {
+      "value": 1
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "cycles"
+    }
+  },
+  "9": {
+    "inputs": {
+      "image": [
+        "44",
+        0
+      ]
+    },
+    "class_type": "ImpactImageBatchToImageList",
+    "_meta": {
+      "title": "images"
+    }
+  },
+  "10": {
+    "inputs": {
+      "mode": "List",
+      "cache_iterations": false,
+      "mode.list": [
+        "9",
+        0
+      ]
+    },
+    "class_type": "StartLoop",
+    "_meta": {
+      "title": "1. For each IMAGE (native Loop)"
+    }
+  },
+  "11": {
+    "inputs": {
+      "threshold": 0.5,
+      "dilation": 10,
+      "crop_factor": 3,
+      "drop_size": 10,
+      "image_index": [
+        "10",
+        0
+      ],
+      "image": [
+        "10",
+        3
+      ],
+      "detector": [
+        "48",
+        0
+      ]
+    },
+    "class_type": "MinFaceDetect",
+    "_meta": {
+      "title": "01 Detect - explicit numeric columns"
+    }
+  },
+  "12": {
+    "inputs": {
+      "use_sam": false,
+      "detection_hint": "center-1",
+      "dilation": 0,
+      "threshold": 0.93,
+      "bbox_expansion": 0,
+      "mask_hint_threshold": 0.7,
+      "mask_hint_use_negative": "False",
+      "image_index": [
+        "10",
+        0
+      ],
+      "image": [
+        "10",
+        3
+      ],
+      "bbox_x1": [
+        "11",
+        5
+      ],
+      "bbox_y1": [
+        "11",
+        6
+      ],
+      "bbox_x2": [
+        "11",
+        7
+      ],
+      "bbox_y2": [
+        "11",
+        8
+      ],
+      "crop_x1": [
+        "11",
+        9
+      ],
+      "crop_y1": [
+        "11",
+        10
+      ],
+      "crop_x2": [
+        "11",
+        11
+      ],
+      "crop_y2": [
+        "11",
+        12
+      ],
+      "masks": [
+        "11",
+        13
+      ],
+      "region_index": [
+        "11",
+        1
+      ],
+      "labels": [
+        "11",
+        2
+      ],
+      "confidences": [
+        "11",
+        3
+      ],
+      "bbox_dtype": [
+        "11",
+        4
+      ],
+      "sam_model": [
+        "49",
+        0
+      ]
+    },
+    "class_type": "MinFaceMask",
+    "_meta": {
+      "title": "02 Masks / optional SAM"
+    }
+  },
+  "13": {
+    "inputs": {
+      "wildcard": "",
+      "seed": 0,
+      "image_index": [
+        "10",
+        0
+      ],
+      "bbox_x1": [
+        "11",
+        5
+      ],
+      "bbox_y1": [
+        "11",
+        6
+      ],
+      "bbox_x2": [
+        "11",
+        7
+      ],
+      "bbox_y2": [
+        "11",
+        8
+      ],
+      "masks": [
+        "12",
+        0
+      ],
+      "region_index": [
+        "11",
+        1
+      ],
+      "labels": [
+        "11",
+        2
+      ],
+      "bbox_dtype": [
+        "11",
+        4
+      ]
+    },
+    "class_type": "MinDetailerWildcardPlan",
+    "_meta": {
+      "title": "Wildcard / order / per-region seed"
+    }
+  },
+  "14": {
+    "inputs": {
+      "mode": "simple",
+      "mode.num_iterations": [
+        "13",
+        5
+      ],
+      "cache_iterations": false,
+      "parent_iteration": [
+        "10",
+        0
+      ],
+      "initial_iteration_value": [
+        "10",
+        3
+      ]
+    },
+    "class_type": "StartLoop",
+    "_meta": {
+      "title": "2. For each detected REGION (native Loop)"
+    }
+  },
+  "15": {
+    "inputs": {
+      "process_index": [
+        "14",
+        0
+      ],
+      "selected_indices": "all",
+      "preview_only": false,
+      "image_index": [
+        "10",
+        0
+      ],
+      "image": [
+        "14",
+        4
+      ],
+      "bbox_x1": [
+        "11",
+        5
+      ],
+      "bbox_y1": [
+        "11",
+        6
+      ],
+      "bbox_x2": [
+        "11",
+        7
+      ],
+      "bbox_y2": [
+        "11",
+        8
+      ],
+      "crop_x1": [
+        "11",
+        9
+      ],
+      "crop_y1": [
+        "11",
+        10
+      ],
+      "crop_x2": [
+        "11",
+        11
+      ],
+      "crop_y2": [
+        "11",
+        12
+      ],
+      "masks": [
+        "12",
+        0
+      ],
+      "region_index": [
+        "11",
+        1
+      ],
+      "labels": [
+        "11",
+        2
+      ],
+      "confidences": [
+        "11",
+        3
+      ],
+      "bbox_dtype": [
+        "11",
+        4
+      ],
+      "order": [
+        "13",
+        0
+      ],
+      "seeds": [
+        "13",
+        1
+      ],
+      "texts": [
+        "13",
+        2
+      ],
+      "enabled": [
+        "13",
+        3
+      ]
+    },
+    "class_type": "MinFaceSelect",
+    "_meta": {
+      "title": "03 Choose region (0-based index / class)"
+    }
+  },
+  "16": {
+    "inputs": {
+      "noise_mask_feather": [
+        "2",
+        0
+      ],
+      "model": [
+        "45",
+        0
+      ]
+    },
+    "class_type": "MinDetailerModel",
+    "_meta": {
+      "title": "diffusion model"
+    }
+  },
+  "17": {
+    "inputs": {
+      "conditioning": [
+        "46",
+        0
+      ],
+      "image": [
+        "14",
+        4
+      ],
+      "crop_x1": [
+        "15",
+        9
+      ],
+      "crop_y1": [
+        "15",
+        10
+      ],
+      "crop_x2": [
+        "15",
+        11
+      ],
+      "crop_y2": [
+        "15",
+        12
+      ]
+    },
+    "class_type": "MinCropConditioning",
+    "_meta": {
+      "title": "positive crop"
+    }
+  },
+  "18": {
+    "inputs": {
+      "conditioning": [
+        "47",
+        0
+      ],
+      "image": [
+        "14",
+        4
+      ],
+      "crop_x1": [
+        "15",
+        9
+      ],
+      "crop_y1": [
+        "15",
+        10
+      ],
+      "crop_x2": [
+        "15",
+        11
+      ],
+      "crop_y2": [
+        "15",
+        12
+      ]
+    },
+    "class_type": "MinCropConditioning",
+    "_meta": {
+      "title": "negative crop"
+    }
+  },
+  "19": {
+    "inputs": {
+      "wildcard": [
+        "15",
+        15
+      ],
+      "model": [
+        "16",
+        0
+      ],
+      "clip": [
+        "45",
+        1
+      ]
+    },
+    "class_type": "MinDetailerWildcardEncode",
+    "_meta": {
+      "title": "Wildcard / LoRA only (independent)"
+    }
+  },
+  "20": {
+    "inputs": {
+      "conditioning_to": [
+        "17",
+        0
+      ],
+      "conditioning_from": [
+        "19",
+        2
+      ]
+    },
+    "class_type": "ConditioningConcat",
+    "_meta": {
+      "title": "concat"
+    }
+  },
+  "21": {
+    "inputs": {
+      "select": [
+        "13",
+        4
+      ],
+      "input0": [
+        "19",
+        3
+      ],
+      "input1": [
+        "20",
+        0
+      ]
+    },
+    "class_type": "MinMux2x1",
+    "_meta": {
+      "title": "concat choice"
+    }
+  },
+  "22": {
+    "inputs": {
+      "select": [
+        "15",
+        16
+      ],
+      "input0": [
+        "17",
+        0
+      ],
+      "input1": [
+        "21",
+        0
+      ]
+    },
+    "class_type": "MinMux2x1",
+    "_meta": {
+      "title": "positive choice"
+    }
+  },
+  "23": {
+    "inputs": {
+      "guide_size": 512,
+      "guide_size_for": true,
+      "max_size": 1024,
+      "feather": [
+        "1",
+        0
+      ],
+      "noise_mask_feather": [
+        "2",
+        0
+      ],
+      "noise_mask": [
+        "3",
+        0
+      ],
+      "force_inpaint": true,
+      "bbox_dtype": [
+        "15",
+        4
+      ],
+      "region_index": [
+        "15",
+        1
+      ],
+      "image_index": [
+        "10",
+        0
+      ],
+      "label": [
+        "15",
+        2
+      ],
+      "image": [
+        "14",
+        4
+      ],
+      "mask": [
+        "15",
+        13
+      ],
+      "bbox_x1": [
+        "15",
+        5
+      ],
+      "bbox_y1": [
+        "15",
+        6
+      ],
+      "bbox_x2": [
+        "15",
+        7
+      ],
+      "bbox_y2": [
+        "15",
+        8
+      ],
+      "crop_x1": [
+        "15",
+        9
+      ],
+      "crop_y1": [
+        "15",
+        10
+      ],
+      "crop_x2": [
+        "15",
+        11
+      ],
+      "crop_y2": [
+        "15",
+        12
+      ]
+    },
+    "class_type": "MinFaceCropUpscale",
+    "_meta": {
+      "title": "04 Current IMAGE - crop / upscale / masks"
+    }
+  },
+  "24": {
+    "inputs": {
+      "pixels": [
+        "23",
+        0
+      ],
+      "vae": [
+        "45",
+        2
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "encode"
+    }
+  },
+  "25": {
+    "inputs": {
+      "enabled": [
+        "3",
+        0
+      ],
+      "samples": [
+        "24",
+        0
+      ],
+      "mask": [
+        "23",
+        3
+      ]
+    },
+    "class_type": "MinDetailerNoiseMask",
+    "_meta": {
+      "title": "latent mask"
+    }
+  },
+  "26": {
+    "inputs": {
+      "noise_mask": [
+        "3",
+        0
+      ],
+      "positive": [
+        "22",
+        0
+      ],
+      "negative": [
+        "18",
+        0
+      ],
+      "vae": [
+        "45",
+        2
+      ],
+      "pixels": [
+        "23",
+        0
+      ],
+      "mask": [
+        "23",
+        3
+      ]
+    },
+    "class_type": "InpaintModelConditioning",
+    "_meta": {
+      "title": "inpaint"
+    }
+  },
+  "27": {
+    "inputs": {
+      "expression": "int(a)",
+      "values.a": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "inpaint index"
+    }
+  },
+  "28": {
+    "inputs": {
+      "select": [
+        "27",
+        1
+      ],
+      "input0": [
+        "25",
+        0
+      ],
+      "input1": [
+        "26",
+        2
+      ]
+    },
+    "class_type": "MinMux2x1",
+    "_meta": {
+      "title": "latent choice"
+    }
+  },
+  "29": {
+    "inputs": {
+      "select": [
+        "27",
+        1
+      ],
+      "input0": [
+        "22",
+        0
+      ],
+      "input1": [
+        "26",
+        0
+      ]
+    },
+    "class_type": "MinMux2x1",
+    "_meta": {
+      "title": "positive inpaint"
+    }
+  },
+  "30": {
+    "inputs": {
+      "select": [
+        "27",
+        1
+      ],
+      "input0": [
+        "18",
+        0
+      ],
+      "input1": [
+        "26",
+        1
+      ]
+    },
+    "class_type": "MinMux2x1",
+    "_meta": {
+      "title": "negative inpaint"
+    }
+  },
+  "31": {
+    "inputs": {
+      "mode": "simple",
+      "mode.num_iterations": [
+        "8",
+        0
+      ],
+      "cache_iterations": false,
+      "parent_iteration": [
+        "14",
+        0
+      ],
+      "initial_iteration_value": [
+        "28",
+        0
+      ]
+    },
+    "class_type": "StartLoop",
+    "_meta": {
+      "title": "3. Detailer cycles (native Loop)"
+    }
+  },
+  "32": {
+    "inputs": {
+      "expression": "a + b",
+      "values.a": [
+        "15",
+        14
+      ],
+      "values.b": [
+        "31",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "cycle seed"
+    }
+  },
+  "33": {
+    "inputs": {
+      "seed": [
+        "32",
+        1
+      ],
+      "steps": [
+        "5",
+        0
+      ],
+      "cfg": [
+        "6",
+        0
+      ],
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": [
+        "7",
+        0
+      ],
+      "model": [
+        "19",
+        0
+      ],
+      "positive": [
+        "29",
+        0
+      ],
+      "negative": [
+        "30",
+        0
+      ],
+      "latent_image": [
+        "31",
+        4
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "05 KSampler (ComfyUI builtin)"
+    }
+  },
+  "34": {
+    "inputs": {
+      "accumulate": false,
+      "output_value": [
+        "33",
+        0
+      ],
+      "next_iteration_value": [
+        "33",
+        0
+      ]
+    },
+    "class_type": "EndLoop",
+    "_meta": {
+      "title": "cycle end"
+    }
+  },
+  "35": {
+    "inputs": {
+      "samples": [
+        "34",
+        0
+      ],
+      "vae": [
+        "45",
+        2
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "06 Existing VAE Decode"
+    }
+  },
+  "36": {
+    "inputs": {
+      "region_index": [
+        "15",
+        1
+      ],
+      "image_index": [
+        "10",
+        0
+      ],
+      "label": [
+        "15",
+        2
+      ],
+      "image": [
+        "14",
+        4
+      ],
+      "region": [
+        "35",
+        0
+      ],
+      "blend_mask": [
+        "23",
+        2
+      ],
+      "crop_x1": [
+        "15",
+        9
+      ],
+      "crop_y1": [
+        "15",
+        10
+      ],
+      "crop_x2": [
+        "15",
+        11
+      ],
+      "crop_y2": [
+        "15",
+        12
+      ]
+    },
+    "class_type": "MinFaceComposite",
+    "_meta": {
+      "title": "07 Resize back / composite"
+    }
+  },
+  "37": {
+    "inputs": {
+      "select": [
+        "15",
+        17
+      ],
+      "input0": [
+        "14",
+        4
+      ],
+      "input1": [
+        "36",
+        0
+      ]
+    },
+    "class_type": "MinMux2x1",
+    "_meta": {
+      "title": "Preview only: skip existing sampler / VAE"
+    }
+  },
+  "38": {
+    "inputs": {
+      "select": [
+        "23",
+        4
+      ],
+      "input0": [
+        "14",
+        4
+      ],
+      "input1": [
+        "37",
+        0
+      ]
+    },
+    "class_type": "MinMux2x1",
+    "_meta": {
+      "title": "size choice"
+    }
+  },
+  "39": {
+    "inputs": {
+      "select": [
+        "15",
+        0
+      ],
+      "input0": [
+        "14",
+        4
+      ],
+      "input1": [
+        "38",
+        0
+      ]
+    },
+    "class_type": "MinMux2x1",
+    "_meta": {
+      "title": "Unselected - current IMAGE unchanged"
+    }
+  },
+  "40": {
+    "inputs": {
+      "accumulate": false,
+      "output_value": [
+        "39",
+        0
+      ],
+      "next_iteration_value": [
+        "39",
+        0
+      ]
+    },
+    "class_type": "EndLoop",
+    "_meta": {
+      "title": "Next region receives composited IMAGE"
+    }
+  },
+  "41": {
+    "inputs": {
+      "region_count": [
+        "11",
+        0
+      ],
+      "image": [
+        "40",
+        0
+      ]
+    },
+    "class_type": "MinDetailerFinalize",
+    "_meta": {
+      "title": "finalize"
+    }
+  },
+  "42": {
+    "inputs": {
+      "accumulate": true,
+      "output_value": [
+        "41",
+        0
+      ]
+    },
+    "class_type": "EndLoop",
+    "_meta": {
+      "title": "Collect processed IMAGES"
+    }
+  },
+  "43": {
+    "inputs": {
+      "images": [
+        "42",
+        0
+      ]
+    },
+    "class_type": "ImageListToImageBatch",
+    "_meta": {
+      "title": "Final IMAGE batch"
+    }
+  },
+  "44": {
+    "inputs": {
+      "image": "Min_node_detailer_example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "INPUT IMAGE"
+    }
+  },
+  "45": {
+    "inputs": {
+      "ckpt_name": "waiIllustriousSDXL_v170.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "checkpoint"
+    }
+  },
+  "46": {
+    "inputs": {
+      "text": "portrait of an adult woman, high quality, detailed face",
+      "clip": [
+        "45",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "positive"
+    }
+  },
+  "47": {
+    "inputs": {
+      "text": "blurry, distorted face, low quality",
+      "clip": [
+        "45",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "negative"
+    }
+  },
+  "48": {
+    "inputs": {
+      "model_name": "bbox/face_yolov8m.pt"
+    },
+    "class_type": "UltralyticsDetectorProvider",
+    "_meta": {
+      "title": "YOLO model - Impact provider"
+    }
+  },
+  "49": {
+    "inputs": {
+      "model_name": "sam_vit_b_01ec64.pth",
+      "device_mode": "AUTO"
+    },
+    "class_type": "SAMLoader",
+    "_meta": {
+      "title": "SAM model - Impact loader"
+    }
+  },
+  "50": {
+    "inputs": {
+      "filename_prefix": "Min_node_detailer",
+      "images": [
+        "43",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "SAVE RESULT"
+    }
+  }
+}
