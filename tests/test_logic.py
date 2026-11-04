@@ -65,7 +65,7 @@ class LogicTests(unittest.TestCase):
         registered = asyncio.run(extension.get_node_list())
         ids = [node.define_schema().node_id for node in registered]
         self.assertEqual(len(ids), len(set(ids)))
-        self.assertEqual(len(registered), 14)
+        self.assertEqual(len(registered), 20)
         self.assertTrue(set(LOGIC_NODES).issubset(registered))
         self.assertIn("MinNamedGet", ids)
         for node in LOGIC_NODES:

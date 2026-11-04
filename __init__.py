@@ -2,6 +2,7 @@ from comfy.comfy_types.node_typing import IO
 from comfy_api.latest import ComfyExtension, io
 
 from .logic import LOGIC_NODES
+from .detailer import DETAILER_NODES
 
 
 PromptVariables = io.Custom("MIN_PROMPT_VARIABLES")
@@ -148,7 +149,7 @@ class NamedGet(io.ComfyNode):
 
 class MinNodeExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [PromptVariableDictionary, PromptTemplateRenderer, BroadcastByInputName, NamedSet, NamedGet, *LOGIC_NODES]
+        return [PromptVariableDictionary, PromptTemplateRenderer, BroadcastByInputName, NamedSet, NamedGet, *LOGIC_NODES, *DETAILER_NODES]
 
 
 async def comfy_entrypoint() -> MinNodeExtension:
