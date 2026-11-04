@@ -5,6 +5,8 @@ import textwrap
 import tokenize
 from types import CodeType
 
+from .detailer_inspection import DetailerInspection
+
 
 def _call_name(node):
     if isinstance(node, ast.Name):
@@ -24,6 +26,12 @@ def _assigns(node, name):
 
 def _boundary(phase, value="None"):
     node = ast.parse(f"yield ({phase!r}, {value})").body[0]
+    node._min_boundary = True
+    return node
+
+
+def _selectable_boundary(phase, value, skip):
+    node = ast.parse(f"if (yield ({phase!r}, {value})) is False:\n{textwrap.indent(skip, '    ')}").body[0]
     node._min_boundary = True
     return node
 
@@ -60,8 +68,8 @@ class _DelegateCalls(ast.NodeTransformer):
 
 
 class _RestoreOriginal(ast.NodeTransformer):
-    def visit_Expr(self, node):
-        return None if getattr(node, "_min_boundary", False) else self.generic_visit(node)
+    def visit(self, node):
+        return None if getattr(node, "_min_boundary", False) else super().visit(node)
 
     def visit_YieldFrom(self, node):
         return copy.deepcopy(node._min_original) if hasattr(node, "_min_original") else self.generic_visit(node)
@@ -118,12 +126,17 @@ def _split_function(function, kind):
         if len(branch) != 1 or not branch[0].orelse:
             raise RuntimeError("The installed Impact Pack FaceDetailer sampling branch is unsupported.")
         branch[0].orelse.insert(0, _boundary("cropped", "cropped_image"))
-        _insert(loop.body, lambda node: node is branch[0], after=[_boundary("regenerated", "enhanced_image")])
+        _insert(loop.body, lambda node: node is branch[0], after=[
+            _selectable_boundary("regenerated", "enhanced_image", "enhanced_image = None\ncnet_pils = None"),
+        ])
+        _insert(loop.body, lambda node: _assigns(node, "mask") and _calls(node, "utils.tensor_gaussian_blur_mask"),
+                after=[_boundary("crop_input", "cropped_image")])
+        _insert(loop.body, lambda node: _assigns(node, "seg_seed"), after=[_boundary("region_ready")])
         loop.body.append(_boundary("composited"))
         _insert(definition.body, lambda node: _assigns(node, "image_tensor"), before=[_boundary("finish")])
     elif kind == "core":
         _insert(definition.body, lambda node: _assigns(node, "cnet_pils"),
-                before=[_boundary("cropped", "upscaled_image")])
+                before=[_selectable_boundary("cropped", "upscaled_image", "return None, None")])
 
     delegate = _DelegateCalls()
     tree = delegate.visit(tree)
@@ -162,14 +175,26 @@ class DetailerRun:
         self.phase = None
         self.value = None
         self.result = None
+        self.inspection = DetailerInspection(self)
+        self.regeneration_options = {"selected_indices": "all", "preview_only": False}
 
-    def advance(self):
+    def frames(self):
+        frames = {}
+        generator = self.generator
+        while inspect.isgenerator(generator):
+            if generator.gi_frame is not None:
+                frames[generator.gi_code.co_name] = generator.gi_frame.f_locals
+            generator = generator.gi_yieldfrom
+        return frames
+
+    def advance(self, decision=None):
         try:
-            self.phase, self.value = next(self.generator)
+            self.phase, self.value = next(self.generator) if decision is None else self.generator.send(decision)
         except StopIteration as finished:
             self.result = finished.value
             self.generator = None
             self.phase, self.value = "complete", None
+        self.inspection.observe(self.phase)
         return self.phase
 
     def require(self, *phases):

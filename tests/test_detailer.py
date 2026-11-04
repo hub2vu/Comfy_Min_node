@@ -1,5 +1,6 @@
 from contextlib import ExitStack
 import copy
+import json
 from pathlib import Path
 import random
 import sys
@@ -33,6 +34,7 @@ from custom_nodes.Min_node.detailer import (
     DETAILER_NODES, FaceComposite, FaceCropUpscale, FaceDetect, FaceMask, FaceRegenerate,
 )
 from custom_nodes.Min_node.detailer_runner import _split_function
+from custom_nodes.Min_node.detailer_inspection import RegionSelection
 
 
 def snapshot(value):
@@ -213,16 +215,17 @@ class DetailerTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(module, name, record))
         return stack
 
-    def run_split(self, parameters):
+    def run_split(self, parameters, **options):
         state = FaceDetect.execute(**parameters)[0]
         FaceMask.execute(state)
         while True:
             FaceCropUpscale.execute(state)
-            FaceRegenerate.execute(state)
+            FaceRegenerate.execute(state, **options)
             output = FaceComposite.execute(state)
             if state.phase == "complete":
                 self.assertIsNone(state.generator)
-                return output.result
+                self.assertEqual(json.loads(output.result[6])["regenerate"]["rows"], state.inspection.views["regenerate"]["rows"])
+                return output.result[:6], state
             self.assertTrue(output.expand)
             if state.phase == "before_detect":
                 FaceDetect.execute(continuation=state, **parameters)
@@ -235,12 +238,14 @@ class DetailerTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(nodes.NODE_CLASS_MAPPINGS, {"FaceDetailer": impact_pack.FaceDetailer}), self.primitives(trace):
             random.seed(99)
             expected = impact_pack.FaceDetailer().doit(**parameters)
+            expected_random_state = random.getstate()
             expected_trace = snapshot(trace)
             trace.clear()
             random.seed(99)
-            actual = self.run_split(parameters)
+            actual, state = self.run_split(parameters)
             self.assert_exact(expected, actual)
             self.assert_exact(expected_trace, snapshot(trace))
+            self.assertEqual(random.getstate(), expected_random_state)
         return actual
 
     def test_exact_pixels_and_operation_trace(self):
@@ -325,9 +330,77 @@ class DetailerTests(unittest.IsolatedAsyncioTestCase):
                         for key in ("default", "min", "max", "step"):
                             if key in expected[1]:
                                 self.assertEqual(spec[1].get(key), expected[1][key])
-        self.assertEqual(tuple(FaceComposite.RETURN_TYPES), impact_pack.FaceDetailer.RETURN_TYPES)
-        self.assertEqual(tuple(FaceComposite.RETURN_NAMES), impact_pack.FaceDetailer.RETURN_NAMES)
-        self.assertEqual(tuple(FaceComposite.OUTPUT_IS_LIST), impact_pack.FaceDetailer.OUTPUT_IS_LIST)
+        self.assertEqual(tuple(FaceComposite.RETURN_TYPES[:6]), impact_pack.FaceDetailer.RETURN_TYPES)
+        self.assertEqual(tuple(FaceComposite.RETURN_NAMES[:6]), impact_pack.FaceDetailer.RETURN_NAMES)
+        self.assertEqual(tuple(FaceComposite.OUTPUT_IS_LIST[:6]), impact_pack.FaceDetailer.OUTPUT_IS_LIST)
+
+    def test_inspection_reports_all_regions_and_masks(self):
+        trace = []
+        parameters = self.parameters(trace)
+        parameters["bbox_detector"].segments[1] = parameters["bbox_detector"].segments[1]._replace(label="hand")
+        with patch.dict(nodes.NODE_CLASS_MAPPINGS, {"FaceDetailer": impact_pack.FaceDetailer}), self.primitives(trace):
+            result, state = self.run_split(parameters)
+        views = state.inspection.views
+        self.assertEqual([row["id"] for row in views["detect"]["rows"]], ["0:0", "0:1"])
+        self.assertEqual([row["class_label"] for row in views["detect"]["rows"]], ["face", "hand"])
+        self.assertEqual(views["detect"]["rows"][0]["bbox"], [6, 6, 14, 14])
+        self.assertEqual(len(views["mask"]["rows"]), 2)
+        self.assertEqual(len(views["crop"]["rows"]), 2)
+        for row in views["regenerate"]["rows"]:
+            self.assertTrue(row["selected"])
+            self.assertEqual(row["status"], "composited")
+            for key in ("mask", "region_preview", "cropped", "upscaled", "refined"):
+                file = row[key]
+                self.assertTrue((state.inspection.folder / file["filename"]).is_file())
+        self.assertEqual(state.inspection.last_combined_mask.shape, (1, 32, 40))
+        self.assertEqual(len(state.inspection.last_region_masks), 2)
+        self.assertEqual({row["id"]: row["final_crop_index"] for row in views["regenerate"]["rows"]}, {"0:0": 1, "0:1": 0})
+        self.assertTrue(all(view["complete"] for view in views.values()))
+
+    def test_original_stop_still_lists_unreached_regions(self):
+        trace = []
+        parameters = self.parameters(trace)
+        parameters["wildcard"] = "[STOP]"
+        with patch.dict(nodes.NODE_CLASS_MAPPINGS, {"FaceDetailer": impact_pack.FaceDetailer}), self.primitives(trace):
+            result, state = self.run_split(parameters)
+        rows = state.inspection.views["regenerate"]["rows"]
+        self.assertEqual([row["id"] for row in rows], ["0:0", "0:1"])
+        self.assertEqual([row["status"] for row in rows], ["[STOP]", "not reached"])
+        self.assertTrue(all("region_preview" in row for row in rows))
+
+    def test_preview_only_skips_encoding_and_sampling(self):
+        trace = []
+        parameters = self.parameters(trace)
+        with patch.dict(nodes.NODE_CLASS_MAPPINGS, {"FaceDetailer": impact_pack.FaceDetailer}), self.primitives(trace):
+            result, state = self.run_split(parameters, preview_only=True)
+        self.assertTrue(torch.equal(result[0], parameters["image"]))
+        self.assertFalse(any(entry[0] in ("sample", "encode", "decode") for entry in trace))
+        self.assertEqual(len(state.inspection.views["crop"]["rows"]), 2)
+        self.assertTrue(all(row["status"] == "preview only" for row in state.inspection.views["regenerate"]["rows"]))
+        self.assertTrue(all(row["selected"] and not row["will_process"] and not row["processed"] for row in state.inspection.views["regenerate"]["rows"]))
+
+    def test_selection_preserves_original_indices_seeds_and_batch_ids(self):
+        for text, batch, wildcard, expected_seeds in [
+            ("1", 1, "", [1235]), ("0", 1, "[DSC]", [1235]),
+            ("1:0", 2, "", [1235]), ("none", 1, "", []),
+        ]:
+            with self.subTest(selection=text, batch=batch, wildcard=wildcard):
+                trace = []
+                parameters = self.parameters(trace)
+                parameters.update(image=parameters["image"].repeat(batch, 1, 1, 1), wildcard=wildcard)
+                with patch.dict(nodes.NODE_CLASS_MAPPINGS, {"FaceDetailer": impact_pack.FaceDetailer}), self.primitives(trace):
+                    result, state = self.run_split(parameters, selected_indices=text)
+                self.assertEqual([entry[1] for entry in trace if entry[0] == "sample"], expected_seeds)
+                for row in state.inspection.views["regenerate"]["rows"]:
+                    self.assertEqual(row["selected"], RegionSelection(text).includes(row["image_index"], row["index"]))
+
+    def test_selection_ranges_and_invalid_tokens(self):
+        selection = RegionSelection("0-2, 1:4-6")
+        self.assertTrue(selection.includes(3, 1))
+        self.assertTrue(selection.includes(1, 5))
+        self.assertFalse(selection.includes(0, 5))
+        with self.assertRaisesRegex(ValueError, "Use all"):
+            RegionSelection("face")
 
 
     async def test_expansion_and_repeated_queue(self):

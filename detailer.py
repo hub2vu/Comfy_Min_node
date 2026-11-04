@@ -12,6 +12,10 @@ Prepared = io.Custom("MIN_FACE_PREPARED")
 Regenerated = io.Custom("MIN_FACE_REGENERATED")
 
 
+def _bind_inspection(cls, state, stage):
+    state.inspection.bind(stage, cls.hidden.unique_id if cls.hidden else None)
+
+
 def _face_inputs():
     return [
         io.Image.Input("image"), io.Model.Input("model"), io.Clip.Input("clip"), io.Vae.Input("vae"),
@@ -61,8 +65,9 @@ class FaceDetect(io.ComfyNode):
             node_id="MinFaceDetect", display_name="1. Face Detect", category="Min_node/Detailer",
             description="Starts the original Impact Pack FaceDetailer with the same settings. Connect the state outputs through all five stages.",
             inputs=[*_face_inputs(), Regenerated.Input("continuation", optional=True, advanced=True)],
-            outputs=[Detected.Output("state"), io.Custom("SEGS").Output("segs")],
-            not_idempotent=True,
+            outputs=[Detected.Output("state"), io.Custom("SEGS").Output("segs"),
+                     io.Image.Output("detections", is_output_list=True), io.String.Output("report")],
+            hidden=[io.Hidden.unique_id], not_idempotent=True,
         )
 
     @classmethod
@@ -77,13 +82,15 @@ class FaceDetect(io.ComfyNode):
             if face_detailer is None:
                 raise RuntimeError("Min_node/Detailer requires ComfyUI-Impact-Pack and its FaceDetailer node.")
             run = DetailerRun(face_detailer, parameters)
+            _bind_inspection(cls, run, "detect")
             run.advance()
         else:
             run = continuation
+        _bind_inspection(cls, run, "detect")
         run.require("before_detect")
         run.advance()
         run.require("detected")
-        return io.NodeOutput(run, run.value)
+        return io.NodeOutput(run, run.value, [run.inspection.last_annotated], run.inspection.report("detect"), ui=run.inspection.ui("detect"))
 
 
 class FaceMask(io.ComfyNode):
@@ -92,16 +99,21 @@ class FaceMask(io.ComfyNode):
         return io.Schema(
             node_id="MinFaceMask", display_name="2. Face Mask", category="Min_node/Detailer",
             inputs=[Detected.Input("state")],
-            outputs=[Masked.Output("state"), io.Custom("SEGS").Output("segs")],
-            not_idempotent=True,
+            outputs=[Masked.Output("state"), io.Custom("SEGS").Output("segs"),
+                     io.Mask.Output("combined_mask"), io.Mask.Output("region_masks", is_output_list=True),
+                     io.Image.Output("mask_overlay", is_output_list=True), io.String.Output("report")],
+            hidden=[io.Hidden.unique_id], not_idempotent=True,
         )
 
     @classmethod
     def execute(cls, state):
+        _bind_inspection(cls, state, "mask")
         state.require("detected")
         state.advance()
         state.require("masked")
-        return io.NodeOutput(state, state.value)
+        inspection = state.inspection
+        return io.NodeOutput(state, state.value, inspection.last_combined_mask, inspection.last_region_masks,
+                             [inspection.last_mask_overlay], inspection.report("mask"), ui=inspection.ui("mask"))
 
 
 class FaceCropUpscale(io.ComfyNode):
@@ -111,18 +123,22 @@ class FaceCropUpscale(io.ComfyNode):
             node_id="MinFaceCropUpscale", display_name="3. Face Crop / Upscale", category="Min_node/Detailer",
             description="Crops the current composited image and runs the original preprocessing and resize. Faces are processed sequentially.",
             inputs=[Masked.Input("state")],
-            outputs=[Prepared.Output("state"), io.Image.Output("upscaled", is_output_list=True)],
-            not_idempotent=True,
+            outputs=[Prepared.Output("state"), io.Image.Output("upscaled", is_output_list=True),
+                     io.Image.Output("cropped", is_output_list=True), io.String.Output("report")],
+            hidden=[io.Hidden.unique_id], not_idempotent=True,
         )
 
     @classmethod
     def execute(cls, state):
+        _bind_inspection(cls, state, "crop")
         state.require("masked", "before_crop")
         state.advance()
-        while state.phase == "before_crop":
+        while state.phase in ("before_crop", "crop_input", "region_ready"):
             state.advance()
         state.require("cropped", "regenerated", "finish")
-        return io.NodeOutput(state, [state.value] if state.phase == "cropped" else [])
+        cropped = [state.inspection.cropped] if state.inspection.cropped is not None else []
+        return io.NodeOutput(state, [state.value] if state.phase == "cropped" else [], cropped,
+                             state.inspection.report("crop"), ui=state.inspection.ui("crop"))
 
 
 class FaceRegenerate(io.ComfyNode):
@@ -130,18 +146,27 @@ class FaceRegenerate(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="MinFaceRegenerate", display_name="4. Face Regenerate", category="Min_node/Detailer",
-            inputs=[Prepared.Input("state")],
-            outputs=[Regenerated.Output("state"), io.Image.Output("refined", is_output_list=True)],
-            not_idempotent=True,
+            inputs=[Prepared.Input("state"),
+                    io.String.Input("selected_indices", default="all", optional=True,
+                                    tooltip="all, none, 0,2, 0-3, or image:index such as 0:1,1:0. Indices refer to stage 2 masks."),
+                    io.Boolean.Input("preview_only", default=False, optional=True,
+                                     tooltip="Inspect all regions without VAE encoding or diffusion sampling, then select thumbnails and queue again.")],
+            outputs=[Regenerated.Output("state"), io.Image.Output("refined", is_output_list=True), io.String.Output("report")],
+            hidden=[io.Hidden.unique_id], not_idempotent=True,
         )
 
     @classmethod
-    def execute(cls, state):
+    def execute(cls, state, selected_indices="all", preview_only=False):
+        _bind_inspection(cls, state, "regenerate")
+        state.regeneration_options = {"selected_indices": selected_indices, "preview_only": preview_only}
+        state.inspection.configure(selected_indices, preview_only)
         state.require("cropped", "regenerated", "finish")
         if state.phase == "cropped":
-            state.advance()
+            state.advance(state.inspection.current_selected)
         state.require("regenerated", "finish")
-        return io.NodeOutput(state, [state.value] if state.phase == "regenerated" and state.value is not None else [])
+        refined = [state.value] if state.inspection.current_selected and state.phase == "regenerated" and state.value is not None else []
+        state.inspection.publish("regenerate")
+        return io.NodeOutput(state, refined, state.inspection.report("regenerate"), ui=state.inspection.ui("regenerate"))
 
 
 class FaceComposite(io.ComfyNode):
@@ -155,19 +180,21 @@ class FaceComposite(io.ComfyNode):
                 io.Image.Output("image"), io.Image.Output("cropped_refined", is_output_list=True),
                 io.Image.Output("cropped_enhanced_alpha", is_output_list=True), io.Mask.Output("mask"),
                 io.Custom("DETAILER_PIPE").Output("detailer_pipe"), io.Image.Output("cnet_images", is_output_list=True),
+                io.String.Output("inspection_report"),
             ],
-            not_idempotent=True, enable_expand=True,
+            hidden=[io.Hidden.unique_id], not_idempotent=True, enable_expand=True,
         )
 
     @classmethod
     def execute(cls, state):
+        _bind_inspection(cls, state, "composite")
         state.require("regenerated", "finish")
-        state.advance()
+        state.advance(state.inspection.current_selected if state.phase == "regenerated" else None)
         while state.phase in ("composited", "finish"):
             state.advance()
         state.require("before_crop", "before_detect", "complete")
         if state.phase == "complete":
-            return io.NodeOutput(*state.result)
+            return io.NodeOutput(*state.result, state.inspection.report(), ui=state.inspection.ui("composite"))
         graph = GraphBuilder()
         if state.phase == "before_detect":
             detect = graph.node("MinFaceDetect", **state.parameters, continuation=state)
@@ -176,9 +203,9 @@ class FaceComposite(io.ComfyNode):
         else:
             crop_state = state
         crop = graph.node("MinFaceCropUpscale", state=crop_state)
-        regenerate = graph.node("MinFaceRegenerate", state=crop.out(0))
+        regenerate = graph.node("MinFaceRegenerate", state=crop.out(0), **state.regeneration_options)
         composite = graph.node("MinFaceDetailerContinue", state=regenerate.out(0))
-        return io.NodeOutput(*(composite.out(i) for i in range(6)), expand=graph.finalize())
+        return io.NodeOutput(*(composite.out(i) for i in range(len(cls.RETURN_TYPES))), expand=graph.finalize(), ui=state.inspection.ui("composite"))
 
 
 class FaceDetailerContinue(io.ComfyNode):
